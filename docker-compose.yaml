@@ -1,0 +1,22 @@
+services:
+  sony-remote:
+    image: python:3.13-alpine
+    container_name: sony-remote
+    command: ["python", "/app/sony_remote.py"]
+    environment:
+      - SONY_AMP=192.168.1.50            # your receiver's (reserved) IP
+      - SONY_NAMES_FILE=/data/sound_field_names.json
+      - PYTHONDONTWRITEBYTECODE=1
+    volumes:
+      - ./sony_remote.py:/app/sony_remote.py:ro
+      - ./data:/data
+    ports:
+      - 8765:8765
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    mem_limit: 64m
+    cpus: 0.25
+    logging:
+      options: { max-size: 1m, max-file: "1" }
+    restart: unless-stopped

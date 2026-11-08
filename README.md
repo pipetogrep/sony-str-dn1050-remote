@@ -18,6 +18,20 @@ python3 sony_remote.py --amp 192.168.1.50        # or: SONY_AMP=192.168.1.50 pyt
 
 Open `http://localhost:8765/`, or `http://<this-machine>:8765/` from a phone.
 
+### Docker (recommended for an always-on box such as a NAS)
+
+Give the receiver a DHCP reservation, set `SONY_AMP` in `docker-compose.yaml`, then:
+
+```sh
+docker compose up -d
+```
+
+It uses the stock `python:3.13-alpine` image with the script mounted in, so there's nothing to build. It runs on a read-only filesystem with all capabilities dropped and is capped at 64 MB RAM and a quarter of a CPU. In practice it idles at about 14 MB and close to 0% CPU. Your sound-field names persist in `./data`.
+
+The receiver can be off for as long as you like. The server keeps serving the page, shows "receiver not responding", retries every 30 seconds and reconnects by itself when the receiver comes back. TCP keepalive and a silence timeout catch connections that die without closing.
+
+### systemd
+
 To run it at login as a systemd user service, put this in `~/.config/systemd/user/sony-remote.service`:
 
 ```ini

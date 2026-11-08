@@ -30,7 +30,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 NA = 0x7FFF
 HERE = os.path.dirname(os.path.abspath(__file__))
-NAMES_FILE = os.path.join(HERE, "sound_field_names.json")
+NAMES_FILE = os.environ.get("SONY_NAMES_FILE") or os.path.join(HERE, "sound_field_names.json")
 
 EQ_GROUPS = {0: "Front", 1: "Center", 2: "Group 3", 3: "Group 4", 4: "Surround"}
 SPEAKERS = [  # (table slot, write id, name)
@@ -68,6 +68,7 @@ class Amp:
         self.state = {"connected": False, "inputs": [], "sf_known": list(KNOWN_SF)}
         self.state_lock = threading.Lock()
         self.version = 0
+        self.last_rx = 0.0
         threading.Thread(target=self._reader, daemon=True).start()
         threading.Thread(target=self._poller, daemon=True).start()
 
@@ -75,9 +76,14 @@ class Amp:
     def _connect(self):
         if self.sock:
             return self.sock
-        s = socket.create_connection((self.host, self.port), 4)
+        s = socket.create_connection((self.host, self.port), 3)
         s.settimeout(None)
+        s.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+        for opt, val in (("TCP_KEEPIDLE", 20), ("TCP_KEEPINTVL", 5), ("TCP_KEEPCNT", 3)):
+            if hasattr(socket, opt):
+                s.setsockopt(socket.IPPROTO_TCP, getattr(socket, opt), val)
         self.sock = s
+        self.last_rx = time.time()
         self._set(connected=True)
         return s
 
@@ -102,22 +108,31 @@ class Amp:
                 if not d:
                     raise OSError("closed")
             except OSError:
-                self._drop()
+                if self.sock is s:
+                    self._drop()
                 buf = b""
                 continue
             buf += d
-            while buf:
-                if buf[0] in (0xFD, 0xFE):
-                    self._got("ack" if buf[0] == 0xFD else "nak")
-                    buf = buf[1:]
-                elif buf[0] == 0x02:
-                    if len(buf) < 2 or len(buf) < buf[1] + 3:
-                        break
-                    n = buf[1]
-                    self._frame(buf[2:2 + n])
-                    buf = buf[n + 3:]
-                else:
-                    buf = buf[1:]
+            self.last_rx = time.time()
+            try:
+                buf = self._parse(buf)
+            except Exception:
+                buf = b""
+
+    def _parse(self, buf):
+        while buf:
+            if buf[0] in (0xFD, 0xFE):
+                self._got("ack" if buf[0] == 0xFD else "nak")
+                buf = buf[1:]
+            elif buf[0] == 0x02:
+                if len(buf) < 2 or len(buf) < buf[1] + 3:
+                    break
+                n = buf[1]
+                self._frame(buf[2:2 + n])
+                buf = buf[n + 3:]
+            else:
+                buf = buf[1:]
+        return buf
 
     def _got(self, what):
         with self.reply:
@@ -183,6 +198,7 @@ class Amp:
     def send(self, payload, wait_ack=True, timeout=1.0):
         with self.send_lock:
             for attempt in (1, 2):
+                had_sock = self.sock is not None
                 try:
                     s = self._connect()
                     with self.reply:
@@ -191,8 +207,8 @@ class Amp:
                     break
                 except OSError:
                     self._drop()
-                    if attempt == 2:
-                        raise IOError("Can't reach the receiver")
+                    if attempt == 2 or not had_sock:
+                        raise IOError("Can't reach the receiver (is it on, with External Control enabled?)")
             res = None
             if wait_ack:
                 end = time.time() + timeout
@@ -235,12 +251,15 @@ class Amp:
     def _poller(self):
         n = 0
         while True:
+            delay = 10
             try:
-                self.refresh_all(inputs=(n % 20 == 0))
+                if self.sock and time.time() - self.last_rx > 35:
+                    self._drop()  # connected but silent: receiver went away without closing
+                self.refresh_all(inputs=(n % 20 == 0 or not self.state["inputs"]))
                 n += 1
             except Exception:
-                pass
-            time.sleep(10)
+                delay = 30  # receiver off / unreachable: retry gently, forever
+            time.sleep(delay)
 
     # ---- view -------------------------------------------------------------
     def view(self):
